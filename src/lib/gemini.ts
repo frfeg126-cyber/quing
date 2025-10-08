@@ -9,61 +9,63 @@ function sanitizeJsonString(jsonString: string): string {
   // Step 1: Remove markdown code blocks
   let cleaned = jsonString.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
 
-  // Step 2: Fix control characters (tab, newline, carriage return, etc.)
-  // Replace actual control characters with escaped versions
-  cleaned = cleaned
-    .replace(/\n/g, '\\n')   // Actual newlines -> \n
-    .replace(/\r/g, '\\r')   // Actual carriage returns -> \r
-    .replace(/\t/g, '\\t')   // Actual tabs -> \t
-    .replace(/\f/g, '\\f')   // Form feed
-    .replace(/\b/g, '\\b');  // Backspace
+  // Step 2: Remove ALL actual control characters (not escaped ones)
+  // This includes \x00-\x1F and \x7F (DEL)
+  // But we must preserve escaped sequences like \\n, \\t, etc.
 
-  // Step 3: Fix Unicode escape sequences
-  // Remove invalid Unicode escapes like \u followed by non-hex
-  cleaned = cleaned.replace(/\\u([0-9a-fA-F]{0,3}(?![0-9a-fA-F]))/g, (match, group) => {
-    // Pad with zeros if incomplete
+  // First, temporarily protect already-escaped sequences
+  const escapeProtector = '___ESCAPE___';
+  cleaned = cleaned
+    .replace(/\\n/g, escapeProtector + 'n')
+    .replace(/\\r/g, escapeProtector + 'r')
+    .replace(/\\t/g, escapeProtector + 't')
+    .replace(/\\f/g, escapeProtector + 'f')
+    .replace(/\\b/g, escapeProtector + 'b')
+    .replace(/\\"/g, escapeProtector + 'quote')
+    .replace(/\\\\/g, escapeProtector + 'backslash');
+
+  // Now remove/replace actual control characters
+  cleaned = cleaned.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, ' ');
+
+  // Handle actual newlines, tabs, and carriage returns by replacing with space
+  cleaned = cleaned
+    .replace(/\n/g, ' ')
+    .replace(/\r/g, ' ')
+    .replace(/\t/g, ' ');
+
+  // Restore protected escape sequences
+  cleaned = cleaned
+    .replace(new RegExp(escapeProtector + 'n', 'g'), '\\n')
+    .replace(new RegExp(escapeProtector + 'r', 'g'), '\\r')
+    .replace(new RegExp(escapeProtector + 't', 'g'), '\\t')
+    .replace(new RegExp(escapeProtector + 'f', 'g'), '\\f')
+    .replace(new RegExp(escapeProtector + 'b', 'g'), '\\b')
+    .replace(new RegExp(escapeProtector + 'quote', 'g'), '\\"')
+    .replace(new RegExp(escapeProtector + 'backslash', 'g'), '\\\\');
+
+  // Step 3: Fix smart quotes and similar characters
+  cleaned = cleaned
+    .replace(/[""]/g, '"')
+    .replace(/['']/g, "'")
+    .replace(/…/g, '...');
+
+  // Step 4: Fix Unicode escape sequences
+  // Replace invalid \u sequences
+  cleaned = cleaned.replace(/\\u([0-9a-fA-F]{0,3})(?![0-9a-fA-F])/g, (match, group) => {
+    if (group.length === 0) return '\\u0000';
     const padded = group.padEnd(4, '0');
     return `\\u${padded}`;
   });
 
-  // Step 4: Fix unescaped quotes inside strings
-  // This is complex - we need to find string boundaries first
-  try {
-    // Try to intelligently fix unescaped quotes
-    let inString = false;
-    let result = '';
-    let lastChar = '';
-
-    for (let i = 0; i < cleaned.length; i++) {
-      const char = cleaned[i];
-      const nextChar = cleaned[i + 1] || '';
-
-      if (char === '"' && lastChar !== '\\') {
-        // Toggle string state
-        inString = !inString;
-        result += char;
-      } else if (char === '"' && lastChar === '\\') {
-        // Already escaped quote
-        result += char;
-      } else {
-        result += char;
-      }
-
-      lastChar = char;
-    }
-
-    cleaned = result;
-  } catch (e) {
-    // If intelligent fixing fails, continue with original
-    console.log('String quote fixing skipped');
-  }
-
   // Step 5: Remove trailing commas before closing brackets
   cleaned = cleaned.replace(/,(\s*[}\]])/g, '$1');
 
-  // Step 6: Fix double-escaped backslashes that might cause issues
-  // But be careful not to break valid escapes
-  cleaned = cleaned.replace(/\\\\\\\\/g, '\\\\');
+  // Step 6: Normalize multiple spaces to single space
+  cleaned = cleaned.replace(/\s+/g, ' ');
+
+  // Step 7: Fix common broken escape sequences
+  // Remove invalid escape sequences that aren't valid JSON
+  cleaned = cleaned.replace(/\\([^"\\\/bfnrtu])/g, '$1');
 
   return cleaned;
 }
@@ -108,52 +110,139 @@ function parseJsonRobust(response: string, expectedType: 'array' | 'object' = 'a
       let cleaned = response
         .replace(/```json/gi, '')
         .replace(/```/g, '')
-        .replace(/[\x00-\x1F\x7F]/g, ' ') // Remove all control characters
         .trim();
+
+      // Protect valid escape sequences
+      const escapeMap: Record<string, string> = {
+        '\\n': '___NEWLINE___',
+        '\\r': '___RETURN___',
+        '\\t': '___TAB___',
+        '\\"': '___QUOTE___',
+        '\\\\': '___BACKSLASH___',
+        '\\f': '___FORMFEED___',
+        '\\b': '___BACKSPACE___'
+      };
+
+      for (const [escaped, placeholder] of Object.entries(escapeMap)) {
+        cleaned = cleaned.split(escaped).join(placeholder);
+      }
+
+      // Remove ALL control characters and problematic chars
+      cleaned = cleaned.replace(/[\x00-\x1F\x7F-\x9F]/g, ' ');
+
+      // Restore escape sequences
+      for (const [escaped, placeholder] of Object.entries(escapeMap)) {
+        cleaned = cleaned.split(placeholder).join(escaped);
+      }
+
+      // Replace smart quotes
+      cleaned = cleaned
+        .replace(/[""]/g, '"')
+        .replace(/['']/g, "'")
+        .replace(/…/g, '...');
+
+      // Normalize whitespace
+      cleaned = cleaned.replace(/\s+/g, ' ');
 
       const pattern = expectedType === 'array' ? /\[[\s\S]*\]/ : /\{[\s\S]*\}/;
       const match = cleaned.match(pattern);
       if (!match) throw new Error('No JSON after aggressive cleaning');
 
-      // Final sanitization
-      let jsonStr = match[0];
-
-      // Replace smart quotes with regular quotes
-      jsonStr = jsonStr
-        .replace(/[""]/g, '"')
-        .replace(/['']/g, "'");
-
-      return JSON.parse(jsonStr);
+      return JSON.parse(match[0]);
     },
 
-    // Strategy 5: Manual string reconstruction (last resort)
+    // Strategy 5: Nuclear option - rebuild JSON byte by byte
     () => {
-      // This tries to rebuild valid JSON by fixing common issues
-      let str = response;
-
-      // Find JSON boundaries
       const [openChar, closeChar] = expectedType === 'array' ? ['[', ']'] : ['{', '}'];
-      const firstIdx = str.indexOf(openChar);
-      const lastIdx = str.lastIndexOf(closeChar);
+      const firstIdx = response.indexOf(openChar);
+      const lastIdx = response.lastIndexOf(closeChar);
 
       if (firstIdx === -1 || lastIdx === -1) {
         throw new Error('Cannot find JSON boundaries');
       }
 
-      str = str.substring(firstIdx, lastIdx + 1);
+      let str = response.substring(firstIdx, lastIdx + 1);
 
-      // Remove all actual newlines and control chars, replace with spaces
-      str = str.replace(/[\r\n\t\f\v]/g, ' ');
+      // Step 1: Protect all already-escaped sequences
+      const protectionMap = new Map<string, string>();
+      let protectionCounter = 0;
 
-      // Fix common issues
+      // Protect \" sequences
+      str = str.replace(/\\"/g, () => {
+        const placeholder = `___PROTECTED_${protectionCounter++}___`;
+        protectionMap.set(placeholder, '\\"');
+        return placeholder;
+      });
+
+      // Protect \\ sequences
+      str = str.replace(/\\\\/g, () => {
+        const placeholder = `___PROTECTED_${protectionCounter++}___`;
+        protectionMap.set(placeholder, '\\\\');
+        return placeholder;
+      });
+
+      // Protect other escape sequences
+      ['\\n', '\\r', '\\t', '\\f', '\\b'].forEach(seq => {
+        str = str.replace(new RegExp(seq.replace('\\', '\\\\'), 'g'), () => {
+          const placeholder = `___PROTECTED_${protectionCounter++}___`;
+          protectionMap.set(placeholder, seq);
+          return placeholder;
+        });
+      });
+
+      // Step 2: Remove all control characters and bad chars
+      str = str.replace(/[\x00-\x09\x0B-\x1F\x7F-\x9F]/g, ' ');
+
+      // Step 3: Clean up formatting
       str = str
-        .replace(/,\s*([}\]])/g, '$1')  // Remove trailing commas
-        .replace(/\s+/g, ' ')            // Normalize whitespace
-        .replace(/\\"/g, '###QUOTE###')  // Protect escaped quotes
-        .replace(/"\s*:\s*"/g, '":"')    // Fix key-value spacing
-        .replace(/###QUOTE###/g, '\\"'); // Restore escaped quotes
+        .replace(/\s+/g, ' ')                // Normalize whitespace
+        .replace(/,\s*([}\]])/g, '$1')       // Remove trailing commas
+        .replace(/"\s+:/g, '":')             // Fix spacing around colons
+        .replace(/:\s+"/g, ':"')             // Fix spacing after colons
+        .replace(/,\s+"/g, ',"')             // Fix spacing after commas
+        .replace(/{\s+"/g, '{"')             // Fix spacing after opening brace
+        .replace(/\[\s+/g, '[')              // Fix spacing after opening bracket
+        .replace(/\s+\]/g, ']')              // Fix spacing before closing bracket
+        .replace(/\s+}/g, '}');              // Fix spacing before closing brace
+
+      // Step 4: Restore protected sequences
+      protectionMap.forEach((original, placeholder) => {
+        str = str.split(placeholder).join(original);
+      });
 
       return JSON.parse(str);
+    },
+
+    // Strategy 6: Smart extraction with bracket balancing
+    () => {
+      const [openChar, closeChar] = expectedType === 'array' ? ['[', ']'] : ['{', '}'];
+
+      // Find the first opening bracket
+      let startIdx = response.indexOf(openChar);
+      if (startIdx === -1) throw new Error('No opening bracket found');
+
+      // Balance brackets to find the matching closing bracket
+      let depth = 0;
+      let endIdx = -1;
+
+      for (let i = startIdx; i < response.length; i++) {
+        if (response[i] === openChar) depth++;
+        if (response[i] === closeChar) depth--;
+
+        if (depth === 0) {
+          endIdx = i;
+          break;
+        }
+      }
+
+      if (endIdx === -1) throw new Error('No matching closing bracket found');
+
+      let jsonStr = response.substring(startIdx, endIdx + 1);
+
+      // Apply sanitization
+      jsonStr = sanitizeJsonString(jsonStr);
+
+      return JSON.parse(jsonStr);
     }
   ];
 
@@ -174,8 +263,25 @@ function parseJsonRobust(response: string, expectedType: 'array' | 'object' = 'a
   // All strategies failed
   console.error('All JSON parsing strategies failed:', errors);
   console.error('Raw response (first 2000 chars):', response.slice(0, 2000));
+  console.error('Raw response (last 500 chars):', response.slice(-500));
 
-  throw new Error(`Failed to parse JSON after ${strategies.length} attempts. Errors: ${errors.join('; ')}`);
+  // Try to identify the specific issue for better error reporting
+  let errorSummary = 'Unknown JSON parsing error';
+  const responsePreview = response.slice(0, 100);
+
+  if (response.includes('```json') || response.includes('```')) {
+    errorSummary = 'Response contains markdown code blocks';
+  } else if (/[\x00-\x1F]/.test(response)) {
+    errorSummary = 'Response contains control characters';
+  } else if (!response.includes(expectedType === 'array' ? '[' : '{')) {
+    errorSummary = `No ${expectedType === 'array' ? 'array' : 'object'} bracket found in response`;
+  } else if (responsePreview.includes('\\b') || responsePreview.includes('\\f')) {
+    errorSummary = 'Response contains invalid escape sequences';
+  } else {
+    errorSummary = 'Malformed JSON structure';
+  }
+
+  throw new Error(`Failed to parse JSON after ${strategies.length} attempts. Issue: ${errorSummary}. First error: ${errors[0]}`);
 }
 
 export interface ExtractedQuestion {

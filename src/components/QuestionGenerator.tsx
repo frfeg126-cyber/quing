@@ -219,7 +219,7 @@ export function QuestionGenerator() {
     const totalWeightage = topicsWithWeightage.reduce((sum, topic) => sum + (topic.weightage || 0.02), 0);
     
     // For 1000+ questions, generate extra questions for zero-weightage topics
-    const shouldGenerateForZeroWeightage = totalQuestions >= 1000;
+    const shouldGenerateForZeroWeightage = totalQuestions >= 500;
     const extraQuestionsCount = shouldGenerateForZeroWeightage ? topicsWithoutWeightage.length : 0;
     
     const result = topics.map(topic => {

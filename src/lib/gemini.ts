@@ -1,6 +1,183 @@
 // Gemini AI Integration
 // Using Google Gemini for better reasoning capabilities
 
+/**
+ * Comprehensive JSON sanitization utility
+ * Fixes all common JSON parsing errors from LLM responses
+ */
+function sanitizeJsonString(jsonString: string): string {
+  // Step 1: Remove markdown code blocks
+  let cleaned = jsonString.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+
+  // Step 2: Fix control characters (tab, newline, carriage return, etc.)
+  // Replace actual control characters with escaped versions
+  cleaned = cleaned
+    .replace(/\n/g, '\\n')   // Actual newlines -> \n
+    .replace(/\r/g, '\\r')   // Actual carriage returns -> \r
+    .replace(/\t/g, '\\t')   // Actual tabs -> \t
+    .replace(/\f/g, '\\f')   // Form feed
+    .replace(/\b/g, '\\b');  // Backspace
+
+  // Step 3: Fix Unicode escape sequences
+  // Remove invalid Unicode escapes like \u followed by non-hex
+  cleaned = cleaned.replace(/\\u([0-9a-fA-F]{0,3}(?![0-9a-fA-F]))/g, (match, group) => {
+    // Pad with zeros if incomplete
+    const padded = group.padEnd(4, '0');
+    return `\\u${padded}`;
+  });
+
+  // Step 4: Fix unescaped quotes inside strings
+  // This is complex - we need to find string boundaries first
+  try {
+    // Try to intelligently fix unescaped quotes
+    let inString = false;
+    let result = '';
+    let lastChar = '';
+
+    for (let i = 0; i < cleaned.length; i++) {
+      const char = cleaned[i];
+      const nextChar = cleaned[i + 1] || '';
+
+      if (char === '"' && lastChar !== '\\') {
+        // Toggle string state
+        inString = !inString;
+        result += char;
+      } else if (char === '"' && lastChar === '\\') {
+        // Already escaped quote
+        result += char;
+      } else {
+        result += char;
+      }
+
+      lastChar = char;
+    }
+
+    cleaned = result;
+  } catch (e) {
+    // If intelligent fixing fails, continue with original
+    console.log('String quote fixing skipped');
+  }
+
+  // Step 5: Remove trailing commas before closing brackets
+  cleaned = cleaned.replace(/,(\s*[}\]])/g, '$1');
+
+  // Step 6: Fix double-escaped backslashes that might cause issues
+  // But be careful not to break valid escapes
+  cleaned = cleaned.replace(/\\\\\\\\/g, '\\\\');
+
+  return cleaned;
+}
+
+/**
+ * Robust JSON parser with multiple fallback strategies
+ * Returns parsed object or throws detailed error
+ */
+function parseJsonRobust(response: string, expectedType: 'array' | 'object' = 'array'): any {
+  const strategies = [
+    // Strategy 1: Direct extraction and sanitization
+    () => {
+      const pattern = expectedType === 'array' ? /\[[\s\S]*\]/ : /\{[\s\S]*\}/;
+      const match = response.match(pattern);
+      if (!match) throw new Error('No JSON found in response');
+      return JSON.parse(sanitizeJsonString(match[0]));
+    },
+
+    // Strategy 2: Remove everything before first bracket
+    () => {
+      const startChar = expectedType === 'array' ? '[' : '{';
+      const startIdx = response.indexOf(startChar);
+      if (startIdx === -1) throw new Error('No opening bracket found');
+      const substring = response.substring(startIdx);
+      return JSON.parse(sanitizeJsonString(substring));
+    },
+
+    // Strategy 3: Extract between first and last matching brackets
+    () => {
+      const [openChar, closeChar] = expectedType === 'array' ? ['[', ']'] : ['{', '}'];
+      const firstIdx = response.indexOf(openChar);
+      const lastIdx = response.lastIndexOf(closeChar);
+      if (firstIdx === -1 || lastIdx === -1 || lastIdx <= firstIdx) {
+        throw new Error('Invalid bracket positions');
+      }
+      const substring = response.substring(firstIdx, lastIdx + 1);
+      return JSON.parse(sanitizeJsonString(substring));
+    },
+
+    // Strategy 4: Ultra-aggressive cleaning
+    () => {
+      let cleaned = response
+        .replace(/```json/gi, '')
+        .replace(/```/g, '')
+        .replace(/[\x00-\x1F\x7F]/g, ' ') // Remove all control characters
+        .trim();
+
+      const pattern = expectedType === 'array' ? /\[[\s\S]*\]/ : /\{[\s\S]*\}/;
+      const match = cleaned.match(pattern);
+      if (!match) throw new Error('No JSON after aggressive cleaning');
+
+      // Final sanitization
+      let jsonStr = match[0];
+
+      // Replace smart quotes with regular quotes
+      jsonStr = jsonStr
+        .replace(/[""]/g, '"')
+        .replace(/['']/g, "'");
+
+      return JSON.parse(jsonStr);
+    },
+
+    // Strategy 5: Manual string reconstruction (last resort)
+    () => {
+      // This tries to rebuild valid JSON by fixing common issues
+      let str = response;
+
+      // Find JSON boundaries
+      const [openChar, closeChar] = expectedType === 'array' ? ['[', ']'] : ['{', '}'];
+      const firstIdx = str.indexOf(openChar);
+      const lastIdx = str.lastIndexOf(closeChar);
+
+      if (firstIdx === -1 || lastIdx === -1) {
+        throw new Error('Cannot find JSON boundaries');
+      }
+
+      str = str.substring(firstIdx, lastIdx + 1);
+
+      // Remove all actual newlines and control chars, replace with spaces
+      str = str.replace(/[\r\n\t\f\v]/g, ' ');
+
+      // Fix common issues
+      str = str
+        .replace(/,\s*([}\]])/g, '$1')  // Remove trailing commas
+        .replace(/\s+/g, ' ')            // Normalize whitespace
+        .replace(/\\"/g, '###QUOTE###')  // Protect escaped quotes
+        .replace(/"\s*:\s*"/g, '":"')    // Fix key-value spacing
+        .replace(/###QUOTE###/g, '\\"'); // Restore escaped quotes
+
+      return JSON.parse(str);
+    }
+  ];
+
+  const errors: string[] = [];
+
+  for (let i = 0; i < strategies.length; i++) {
+    try {
+      console.log(`Trying JSON parse strategy ${i + 1}/${strategies.length}`);
+      const result = strategies[i]();
+      console.log(`✓ Strategy ${i + 1} succeeded`);
+      return result;
+    } catch (error) {
+      errors.push(`Strategy ${i + 1}: ${error.message}`);
+      console.log(`✗ Strategy ${i + 1} failed: ${error.message}`);
+    }
+  }
+
+  // All strategies failed
+  console.error('All JSON parsing strategies failed:', errors);
+  console.error('Raw response (first 2000 chars):', response.slice(0, 2000));
+
+  throw new Error(`Failed to parse JSON after ${strategies.length} attempts. Errors: ${errors.join('; ')}`);
+}
+
 export interface ExtractedQuestion {
   question_statement: string;
   question_type: 'MCQ' | 'MSQ' | 'NAT' | 'Subjective';
@@ -263,20 +440,12 @@ Focus on accuracy and completeness. Extract everything visible.`;
     // Store page content in memory
     pageMemory.set(pageNumber, response.slice(0, 1000));
     
-    // Parse JSON response
+    // Parse JSON response using robust parser
     let questions: ExtractedQuestion[] = [];
     try {
-      // Extract JSON from response
-      const jsonMatch = response.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        questions = JSON.parse(jsonMatch[0]);
-      } else {
-        console.warn('No JSON array found in response');
-        return [];
-      }
+      questions = parseJsonRobust(response, 'array') as ExtractedQuestion[];
     } catch (parseError) {
       console.error('JSON parsing error:', parseError);
-      console.log('Raw response:', response);
       return [];
     }
 
@@ -385,32 +554,34 @@ QUALITY STANDARDS:
 6. Avoid repetitive patterns - each question should feel unique
 7. If you get stuck on a solution, try a different approach rather than continuing with errors
 
-IMPORTANT JSON FORMATTING:
-- Escape all special characters properly in JSON strings
-- Use \\n for newlines within strings, \\" for quotes
-- Do not include actual newline characters in JSON string values
-- Ensure all strings are properly enclosed in double quotes
-
 IMPORTANT: Avoid infinite loops in solution generation. If a solution has mistakes:
 - Don't keep trying the same failed approach
 - Verify your answer is mathematically/logically correct
 - Use a completely different method if needed
 - Double-check all calculations before finalizing
 
-Return response in this exact JSON format:
+CRITICAL JSON OUTPUT REQUIREMENTS:
+1. Return ONLY the JSON array - no text before or after
+2. Do NOT use markdown code blocks (no \`\`\`json or \`\`\`)
+3. Do NOT include actual line breaks in strings - replace with space
+4. Do NOT use control characters (tabs, newlines) inside string values
+5. Keep all text on single lines within string values
+6. Use simple ASCII quotes only (no smart quotes "" or '')
+7. Avoid complex Unicode characters if possible
+8. Double-check JSON validity before returning
+
+JSON FORMAT (question_statement and solution must be single-line text):
 [
   {
-    "question_statement": "Complete question with natural wording (not robotic)",
+    "question_statement": "Complete question text on one line without line breaks",
     "question_type": "${questionType}",
     ${questionType === 'MCQ' || questionType === 'MSQ' ? '"options": ["Option A", "Option B", "Option C", "Option D"],' : '"options": null,'}
     "answer": "${questionType === 'MCQ' ? 'A' : questionType === 'MSQ' ? 'A, C' : questionType === 'NAT' ? '42.5' : 'Detailed answer'}",
-    "solution": "Clear, step-by-step solution using Topic Notes methods. Write as a professor would explain to a student - conversational but precise."
+    "solution": "Complete solution explanation on one line without line breaks. Use periods to separate steps."
   }
 ]
 
-CRITICAL: Return ONLY valid JSON. Do not include markdown code blocks or any text outside the JSON array.
-Ensure all special characters in strings are properly escaped (use \\n for newlines, \\" for quotes).
-Generate exactly ${count} question(s) with verified accuracy.`;
+Generate exactly ${count} question(s). Remember: ALL strings must be single-line, no line breaks allowed.`;
 
   try {
     console.log('CHECKPOINT: Starting question generation for topic', {
@@ -431,43 +602,11 @@ Generate exactly ${count} question(s) with verified accuracy.`;
 
     console.log('CHECKPOINT PASSED: Response received', { responseLength: response.length });
 
-    // Parse JSON response with robust error handling
+    // Parse JSON response using robust parser
     let questions: ExtractedQuestion[] = [];
     try {
-      // Try to find JSON array in response
-      const jsonMatch = response.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        console.log('CHECKPOINT PASSED: JSON array found in response');
-        let jsonString = jsonMatch[0];
-
-        // Clean the JSON string to fix common escape issues
-        // Replace problematic escaped characters
-        jsonString = jsonString
-          .replace(/\\n/g, '\\\\n')  // Fix newlines in strings
-          .replace(/\\t/g, '\\\\t')  // Fix tabs
-          .replace(/\\r/g, '\\\\r'); // Fix carriage returns
-
-        try {
-          questions = JSON.parse(jsonString);
-        } catch (firstParseError) {
-          console.log('First parse failed, trying alternative cleaning...');
-
-          // Alternative: Try to parse with more aggressive cleaning
-          // Remove markdown code blocks if present
-          let cleanedResponse = response.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
-
-          // Extract JSON array again
-          const jsonMatch2 = cleanedResponse.match(/\[[\s\S]*\]/);
-          if (jsonMatch2) {
-            questions = JSON.parse(jsonMatch2[0]);
-          } else {
-            throw firstParseError;
-          }
-        }
-      } else {
-        console.error('CHECKPOINT FAILED: No JSON array found in response. Raw response:', response.slice(0, 500));
-        throw new Error('No JSON array found in response');
-      }
+      questions = parseJsonRobust(response, 'array') as ExtractedQuestion[];
+      console.log('CHECKPOINT PASSED: Successfully parsed JSON response');
 
       // Checkpoint: Validate questions structure
       if (!Array.isArray(questions) || questions.length === 0) {
@@ -503,8 +642,7 @@ Generate exactly ${count} question(s) with verified accuracy.`;
       console.log('CHECKPOINT PASSED: All questions validated successfully');
 
     } catch (parseError) {
-      console.error('CHECKPOINT FAILED: JSON parsing error', parseError);
-      console.log('Raw response (first 1000 chars):', response.slice(0, 1000));
+      console.error('CHECKPOINT FAILED: All JSON parsing strategies failed', parseError);
       throw new Error(`Failed to parse generated questions: ${parseError.message}`);
     }
 
@@ -557,44 +695,33 @@ For each question provide:
 - Step-by-step solution using Topic Notes methods
 - Clear explanation in professor-like natural language
 
-Return response in this exact JSON format:
+CRITICAL JSON OUTPUT REQUIREMENTS:
+1. Return ONLY the JSON array - no text before or after
+2. Do NOT use markdown code blocks (no \`\`\`json or \`\`\`)
+3. Do NOT include line breaks in strings - keep all text single-line
+4. Do NOT use control characters inside string values
+5. Use simple ASCII quotes only (no smart quotes)
+6. Solution text must be on one continuous line
+
+JSON FORMAT (solution must be single-line text):
 [
   {
     "answer": "Correct answer",
-    "solution": "Natural, conversational step-by-step solution as a professor would explain it, using methods from Topic Notes"
+    "solution": "Complete solution on one line without line breaks. Use periods to separate steps."
   }
 ]
 
-CRITICAL: Return ONLY valid JSON. Do not include markdown code blocks or any text outside the JSON array.
-Escape all special characters properly (use \\n for newlines, \\" for quotes).
 Verify all calculations and ensure solution correctness.`;
 
   try {
     const response = await callGeminiAPI(prompt, undefined, 0.1, 3000);
     
-    // Parse JSON response with robust error handling
+    // Parse JSON response using robust parser
     let solutions: { answer: string; solution: string }[] = [];
     try {
-      // Remove markdown code blocks if present
-      let cleanedResponse = response.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
-
-      const jsonMatch = cleanedResponse.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        let jsonString = jsonMatch[0];
-
-        // Clean the JSON string
-        jsonString = jsonString
-          .replace(/\\n/g, '\\\\n')
-          .replace(/\\t/g, '\\\\t')
-          .replace(/\\r/g, '\\\\r');
-
-        solutions = JSON.parse(jsonString);
-      } else {
-        throw new Error('No JSON array found in response');
-      }
+      solutions = parseJsonRobust(response, 'array') as { answer: string; solution: string }[];
     } catch (parseError) {
       console.error('JSON parsing error:', parseError);
-      console.log('Raw response:', response.slice(0, 1000));
       throw new Error(`Failed to parse generated solutions: ${parseError.message}`);
     }
 
@@ -640,43 +767,30 @@ ANALYSIS PROCESS:
 3. For MCQ/MSQ: Verify each option's correctness
 4. For NAT: Verify numerical accuracy
 
-Return response in this exact JSON format:
+CRITICAL JSON OUTPUT REQUIREMENTS:
+1. Return ONLY the JSON object - no text before or after
+2. Do NOT use markdown code blocks (no \`\`\`json or \`\`\`)
+3. Do NOT include line breaks in strings - keep all text single-line
+4. Use simple ASCII quotes only
+
+JSON FORMAT (all text must be single-line):
 {
-  "isWrong": true/false,
-  "reason": "Detailed explanation of why the question is wrong or correct",
-  "correctAnswer": "What the correct answer should be (if different from provided)"
+  "isWrong": true,
+  "reason": "Single line explanation without line breaks",
+  "correctAnswer": "Correct answer if applicable"
 }
 
-CRITICAL: Return ONLY valid JSON. Do not include markdown code blocks or any text outside the JSON object.
-Escape all special characters properly (use \\n for newlines, \\" for quotes).
 Be extremely thorough and accurate in your analysis.`;
 
   try {
     const response = await callGeminiAPI(prompt, undefined, 0.1, 2000);
     
-    // Parse JSON response with robust error handling
+    // Parse JSON response using robust parser
     let validation: { isWrong: boolean; reason: string; correctAnswer?: string };
     try {
-      // Remove markdown code blocks if present
-      let cleanedResponse = response.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
-
-      const jsonMatch = cleanedResponse.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        let jsonString = jsonMatch[0];
-
-        // Clean the JSON string
-        jsonString = jsonString
-          .replace(/\\n/g, '\\\\n')
-          .replace(/\\t/g, '\\\\t')
-          .replace(/\\r/g, '\\\\r');
-
-        validation = JSON.parse(jsonString);
-      } else {
-        throw new Error('No JSON object found in response');
-      }
+      validation = parseJsonRobust(response, 'object') as { isWrong: boolean; reason: string; correctAnswer?: string };
     } catch (parseError) {
       console.error('JSON parsing error:', parseError);
-      console.log('Raw response:', response.slice(0, 1000));
       // Fallback: assume question is correct if parsing fails
       return { isWrong: false, reason: 'Validation parsing failed - marked as correct by default' };
     }

@@ -385,6 +385,12 @@ QUALITY STANDARDS:
 6. Avoid repetitive patterns - each question should feel unique
 7. If you get stuck on a solution, try a different approach rather than continuing with errors
 
+IMPORTANT JSON FORMATTING:
+- Escape all special characters properly in JSON strings
+- Use \\n for newlines within strings, \\" for quotes
+- Do not include actual newline characters in JSON string values
+- Ensure all strings are properly enclosed in double quotes
+
 IMPORTANT: Avoid infinite loops in solution generation. If a solution has mistakes:
 - Don't keep trying the same failed approach
 - Verify your answer is mathematically/logically correct
@@ -402,6 +408,8 @@ Return response in this exact JSON format:
   }
 ]
 
+CRITICAL: Return ONLY valid JSON. Do not include markdown code blocks or any text outside the JSON array.
+Ensure all special characters in strings are properly escaped (use \\n for newlines, \\" for quotes).
 Generate exactly ${count} question(s) with verified accuracy.`;
 
   try {
@@ -423,14 +431,39 @@ Generate exactly ${count} question(s) with verified accuracy.`;
 
     console.log('CHECKPOINT PASSED: Response received', { responseLength: response.length });
 
-    // Parse JSON response
+    // Parse JSON response with robust error handling
     let questions: ExtractedQuestion[] = [];
     try {
       // Try to find JSON array in response
       const jsonMatch = response.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
         console.log('CHECKPOINT PASSED: JSON array found in response');
-        questions = JSON.parse(jsonMatch[0]);
+        let jsonString = jsonMatch[0];
+
+        // Clean the JSON string to fix common escape issues
+        // Replace problematic escaped characters
+        jsonString = jsonString
+          .replace(/\\n/g, '\\\\n')  // Fix newlines in strings
+          .replace(/\\t/g, '\\\\t')  // Fix tabs
+          .replace(/\\r/g, '\\\\r'); // Fix carriage returns
+
+        try {
+          questions = JSON.parse(jsonString);
+        } catch (firstParseError) {
+          console.log('First parse failed, trying alternative cleaning...');
+
+          // Alternative: Try to parse with more aggressive cleaning
+          // Remove markdown code blocks if present
+          let cleanedResponse = response.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
+
+          // Extract JSON array again
+          const jsonMatch2 = cleanedResponse.match(/\[[\s\S]*\]/);
+          if (jsonMatch2) {
+            questions = JSON.parse(jsonMatch2[0]);
+          } else {
+            throw firstParseError;
+          }
+        }
       } else {
         console.error('CHECKPOINT FAILED: No JSON array found in response. Raw response:', response.slice(0, 500));
         throw new Error('No JSON array found in response');
@@ -532,24 +565,37 @@ Return response in this exact JSON format:
   }
 ]
 
+CRITICAL: Return ONLY valid JSON. Do not include markdown code blocks or any text outside the JSON array.
+Escape all special characters properly (use \\n for newlines, \\" for quotes).
 Verify all calculations and ensure solution correctness.`;
 
   try {
     const response = await callGeminiAPI(prompt, undefined, 0.1, 3000);
     
-    // Parse JSON response
+    // Parse JSON response with robust error handling
     let solutions: { answer: string; solution: string }[] = [];
     try {
-      const jsonMatch = response.match(/\[[\s\S]*\]/);
+      // Remove markdown code blocks if present
+      let cleanedResponse = response.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
+
+      const jsonMatch = cleanedResponse.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
-        solutions = JSON.parse(jsonMatch[0]);
+        let jsonString = jsonMatch[0];
+
+        // Clean the JSON string
+        jsonString = jsonString
+          .replace(/\\n/g, '\\\\n')
+          .replace(/\\t/g, '\\\\t')
+          .replace(/\\r/g, '\\\\r');
+
+        solutions = JSON.parse(jsonString);
       } else {
         throw new Error('No JSON array found in response');
       }
     } catch (parseError) {
       console.error('JSON parsing error:', parseError);
-      console.log('Raw response:', response);
-      throw new Error('Failed to parse generated solutions');
+      console.log('Raw response:', response.slice(0, 1000));
+      throw new Error(`Failed to parse generated solutions: ${parseError.message}`);
     }
 
     console.log(`Generated solutions for ${solutions.length} PYQs`);
@@ -601,23 +647,36 @@ Return response in this exact JSON format:
   "correctAnswer": "What the correct answer should be (if different from provided)"
 }
 
+CRITICAL: Return ONLY valid JSON. Do not include markdown code blocks or any text outside the JSON object.
+Escape all special characters properly (use \\n for newlines, \\" for quotes).
 Be extremely thorough and accurate in your analysis.`;
 
   try {
     const response = await callGeminiAPI(prompt, undefined, 0.1, 2000);
     
-    // Parse JSON response
+    // Parse JSON response with robust error handling
     let validation: { isWrong: boolean; reason: string; correctAnswer?: string };
     try {
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      // Remove markdown code blocks if present
+      let cleanedResponse = response.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
+
+      const jsonMatch = cleanedResponse.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        validation = JSON.parse(jsonMatch[0]);
+        let jsonString = jsonMatch[0];
+
+        // Clean the JSON string
+        jsonString = jsonString
+          .replace(/\\n/g, '\\\\n')
+          .replace(/\\t/g, '\\\\t')
+          .replace(/\\r/g, '\\\\r');
+
+        validation = JSON.parse(jsonString);
       } else {
         throw new Error('No JSON object found in response');
       }
     } catch (parseError) {
       console.error('JSON parsing error:', parseError);
-      console.log('Raw response:', response);
+      console.log('Raw response:', response.slice(0, 1000));
       // Fallback: assume question is correct if parsing fails
       return { isWrong: false, reason: 'Validation parsing failed - marked as correct by default' };
     }
